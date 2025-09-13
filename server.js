@@ -62,7 +62,6 @@ app.post('/api/auth/register', async (req, res) => {
     const existing = await User.findOne({ email });
     if (existing) return res.status(400).json({ message: 'User exists' });
 
-    // Using bcryptjs hashing
     const bcrypt = require('bcryptjs');
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
@@ -90,7 +89,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Protected list of users (for choosing who to chat with)
+// Protected list of users
 app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const users = await User.find({}, { passwordHash: 0 }).limit(100);
@@ -100,22 +99,18 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
-// Get chat history between current user and target user
+// Get chat history
 app.get('/api/messages/:targetUserId', authenticateToken, async (req, res) => {
   try {
     const { targetUserId } = req.params;
     const currentUserId = req.user.id;
-    
-    // Create room ID consistently
     const roomId = makeRoomId(currentUserId, targetUserId);
-    
-    // Fetch messages from this room, populated with sender info
+
     const messages = await Message.find({ roomId })
       .populate('from', 'name email')
-      .sort({ createdAt: 1 }) // oldest first
-      .limit(200); // limit to last 200 messages
-    
-    // Format messages for frontend
+      .sort({ createdAt: 1 })
+      .limit(200);
+
     const formattedMessages = messages.map(msg => ({
       id: msg._id,
       text: msg.text,
@@ -126,7 +121,7 @@ app.get('/api/messages/:targetUserId', authenticateToken, async (req, res) => {
         email: msg.from.email
       }
     }));
-    
+
     res.json({ messages: formattedMessages });
   } catch (err) {
     console.error('Get messages error:', err);
@@ -134,7 +129,7 @@ app.get('/api/messages/:targetUserId', authenticateToken, async (req, res) => {
   }
 });
 
-// Protected example (optional)
+// Protected example
 app.get('/api/me', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id, { passwordHash: 0 });
@@ -145,26 +140,21 @@ app.get('/api/me', authenticateToken, async (req, res) => {
   }
 });
 
-// --------------- Socket.IO realtime ----------------
-// We'll hold temporary behavior buffers per room; small in-memory store
-const behaviorBuffers = {}; // { roomId: { [socketId]: [paramObjects, ...], aggregatedAt: timestamp } }
+// ----------------- Socket.IO realtime -----------------
+const behaviorBuffers = {};
 
 // forward aggregated features to ML model
 async function forwardToModelAndBroadcast(roomId) {
   const buf = behaviorBuffers[roomId];
   if (!buf) return;
 
-  // Collect params from both participants (if present)
   const allParams = [];
   for (const sid of Object.keys(buf)) {
     const arr = buf[sid] || [];
-    if (arr.length) {
-      allParams.push(...arr);
-    }
+    if (arr.length) allParams.push(...arr);
   }
   if (allParams.length === 0) return;
 
-  // Compute simple aggregate features
   const aggregate = allParams.reduce((acc, p) => {
     acc.pause_duration_ms += p.pause_duration_ms || 0;
     acc.scroll_depth_pct += p.scroll_depth_pct || 0;
@@ -180,17 +170,17 @@ async function forwardToModelAndBroadcast(roomId) {
     avg_typing_speed_chars_per_min: Math.round(aggregate.typing_speed_chars_per_min / n),
     avg_response_time_ms: Math.round(aggregate.response_time_ms / n),
     sample_count: n,
-    raw: allParams.slice(-20) // keep last 20 items for context
+    raw: allParams.slice(-20)
   };
 
-  // Clear buffers for room (we'll process statelessly)
+  // Log payload for clarity
+  console.log("📤 Sending payload to ML model:", JSON.stringify(features, null, 2));
+
   behaviorBuffers[roomId] = {};
 
-  // send to ML endpoint
   try {
     const resp = await axios.post(ML_MODEL_URL, features, { timeout: 10000 });
     const mlData = resp.data;
-    // broadcast to everyone in the room: event 'ml_analysis'
     io.to(roomId).emit('ml_analysis', { roomId, features, mlData, ts: Date.now() });
   } catch (err) {
     console.error('ML forward error', err?.message || err);
@@ -201,7 +191,6 @@ async function forwardToModelAndBroadcast(roomId) {
 io.on('connection', (socket) => {
   console.log('socket connected', socket.id);
 
-  // authenticate event: client sends { token }
   socket.on('authenticate', async (data) => {
     try {
       const token = data?.token;
@@ -218,47 +207,34 @@ io.on('connection', (socket) => {
     }
   });
 
-  // join a private room with targetUserId
   socket.on('join_room', async ({ targetUserId }) => {
     if (!socket.user) return socket.emit('error', { message: 'Not authenticated' });
     const roomId = makeRoomId(socket.user.id, targetUserId);
     socket.join(roomId);
     socket.roomId = roomId;
     socket.targetUserId = targetUserId;
-    
-    // notify room members
+
     io.to(roomId).emit('system_message', { text: `${socket.user.name} joined the chat`, ts: Date.now() });
-    
-    // init buffer
     if (!behaviorBuffers[roomId]) behaviorBuffers[roomId] = {};
   });
 
-  // chat message; payload { text }
   socket.on('chat_message', async (payload) => {
     if (!socket.user || !socket.roomId) return socket.emit('error', { message: 'Not in room or not auth' });
     try {
-      // Save message to database
-      const msg = await Message.create({
-        from: socket.user.id,
-        text: payload.text,
-        roomId: socket.roomId
-      });
-
-      // Populate the from field for the response
+      const msg = await Message.create({ from: socket.user.id, text: payload.text, roomId: socket.roomId });
       const populatedMsg = await Message.findById(msg._id).populate('from', 'name email');
-      
-      const out = { 
-        id: populatedMsg._id, 
-        text: populatedMsg.text, 
-        createdAt: populatedMsg.createdAt, 
-        from: { 
-          id: populatedMsg.from._id.toString(), 
+
+      const out = {
+        id: populatedMsg._id,
+        text: populatedMsg.text,
+        createdAt: populatedMsg.createdAt,
+        from: {
+          id: populatedMsg.from._id.toString(),
           name: populatedMsg.from.name,
-          email: populatedMsg.from.email 
-        } 
+          email: populatedMsg.from.email
+        }
       };
-      
-      // Broadcast to everyone in the room
+
       io.to(socket.roomId).emit('chat_message', out);
     } catch (err) {
       console.error('save message error', err);
@@ -266,27 +242,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  // behavior params event: { params: [ { ... }, ... ] }
   socket.on('behavior_params', async (payload) => {
     if (!socket.user || !socket.roomId) return socket.emit('error', { message: 'Not in room or not auth' });
     const arr = payload.params || [];
-    // store in behaviorBuffers under room and socket.id
     const roomId = socket.roomId;
     if (!behaviorBuffers[roomId]) behaviorBuffers[roomId] = {};
     if (!behaviorBuffers[roomId][socket.id]) behaviorBuffers[roomId][socket.id] = [];
-    // push new params (keep limited size)
-    behaviorBuffers[roomId][socket.id].push(...arr.slice(-10)); // store up to last 10 per sender
+    behaviorBuffers[roomId][socket.id].push(...arr.slice(-10));
     if (behaviorBuffers[roomId][socket.id].length > 30) {
       behaviorBuffers[roomId][socket.id].splice(0, behaviorBuffers[roomId][socket.id].length - 30);
     }
 
-    // Option A: run model immediately for every batch (fine for low traffic)
     await forwardToModelAndBroadcast(roomId);
-    // Alternatively you could debounce and call forwardToModelAndBroadcast after N seconds or when both participants have sent events.
   });
 
   socket.on('disconnect', () => {
-    // cleanup buffers referencing this socket
     if (socket.roomId && behaviorBuffers[socket.roomId]) {
       delete behaviorBuffers[socket.roomId][socket.id];
     }

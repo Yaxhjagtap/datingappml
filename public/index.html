@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Chat + ML Demo</title>
+  <script src="https://cdn.socket.io/4.8.0/socket.io.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; max-width: 900px; margin:auto; }
+    .box { border: 1px solid #ddd; padding:12px; margin-bottom:12px; border-radius:8px; }
+    #messages { height: 300px; overflow:auto; background:#fafafa; padding:8px; }
+    #mlResponses { height: 120px; overflow:auto; background:#f7ffef; padding:8px; }
+    input, button, textarea { padding:8px; font-size:14px; }
+    .small { font-size:12px; color:#555; }
+  </style>
+</head>
+<body>
+  <h1>Realtime Chat + ML Demo</h1>
+
+  <div class="box">
+    <h3>Register / Login</h3>
+    <div id="authArea">
+      <input id="name" placeholder="Name" /><br/><br/>
+      <input id="email" placeholder="Email" /><br/><br/>
+      <input id="password" type="password" placeholder="Password" /><br/><br/>
+      <button id="btnRegister">Register</button>
+      <button id="btnLogin">Login</button>
+      <div id="authMsg" class="small"></div>
+    </div>
+  </div>
+
+  <div class="box" id="chatArea" style="display:none">
+    <h3>Chat</h3>
+    <div id="messages"></div>
+    <textarea id="msgText" rows="2" style="width:100%"></textarea><br/>
+    <button id="sendMsg">Send</button>
+    <hr/>
+    <h4>Send behavior params (real-time)</h4>
+    <button id="sendParams">Send Provided Params</button>
+    <div class="small">ML responses:</div>
+    <div id="mlResponses"></div>
+  </div>
+
+  <script>
+    const API = '/api';
+    let token = localStorage.getItem('token') || null;
+    const socket = io(window.location.origin, { autoConnect: false });
+
+    function show(msg) { const el = document.getElementById('authMsg'); el.innerText = msg; }
+    function addMessage(m) {
+      const d = document.getElementById('messages');
+      const p = document.createElement('div');
+      p.innerHTML = `<b>${m.from?.name || 'unknown'}</b>: ${m.text} <span class="small">(${new Date(m.createdAt).toLocaleTimeString()})</span>`;
+      d.appendChild(p); d.scrollTop = d.scrollHeight;
+    }
+    function addMlResp(r) {
+      const d = document.getElementById('mlResponses');
+      const p = document.createElement('div');
+      p.innerText = JSON.stringify(r);
+      d.appendChild(p); d.scrollTop = d.scrollHeight;
+    }
+
+    if (token) {
+      afterLogin();
+    }
+
+    document.getElementById('btnRegister').onclick = async () => {
+      const name = document.getElementById('name').value;
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const r = await fetch(API + '/register', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, email, password })
+      });
+      const j = await r.json();
+      if (j.token) {
+        localStorage.setItem('token', j.token);
+        token = j.token;
+        afterLogin();
+      } else {
+        show(JSON.stringify(j));
+      }
+    };
+
+    document.getElementById('btnLogin').onclick = async () => {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const r = await fetch(API + '/login', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ email, password })
+      });
+      const j = await r.json();
+      if (j.token) {
+        localStorage.setItem('token', j.token);
+        token = j.token;
+        afterLogin();
+      } else {
+        show(JSON.stringify(j));
+      }
+    };
+
+    async function afterLogin() {
+      document.getElementById('authArea').style.display='none';
+      document.getElementById('chatArea').style.display='block';
+      // connect socket with token
+      socket.connect();
+      socket.on('connect', () => {
+        console.log('socket connected');
+        socket.emit('authenticate', { token });
+      });
+
+      socket.on('authenticated', (data) => {
+        addMlResp({ system: 'Socket authenticated', user: data.user });
+      });
+      socket.on('unauthorized', (d) => {
+        addMlResp({ system: 'Socket unauthorized', d });
+      });
+
+      socket.on('chat_message', (m) => { addMessage(m); });
+      socket.on('ml_response', (r) => { addMlResp({ private: r }); });
+      socket.on('ml_response_broadcast', (r) => { addMlResp({ broadcast: r }); });
+      socket.on('ml_error', (e) => { addMlResp({ error: e }); });
+    }
+
+    document.getElementById('sendMsg').onclick = async () => {
+      const text = document.getElementById('msgText').value;
+      if (!text) return;
+      // emit via socket
+      socket.emit('chat_message', { text });
+      document.getElementById('msgText').value = '';
+    };
+
+    // send the param arrays you provided
+    const paramsPayload = [
+      {
+        "pause_duration_ms": 1200,
+        "scroll_depth_pct": 50,
+        "typing_speed_chars_per_min": 300,
+        "response_time_ms": 2500
+      },
+      {
+        "pause_duration_ms": 800,
+        "scroll_depth_pct": 30,
+        "typing_speed_chars_per_min": 400,
+        "response_time_ms": 1800
+      }
+    ];
+
+    document.getElementById('sendParams').onclick = () => {
+      socket.emit('behavior_params', { params: paramsPayload });
+      addMlResp({ sent: paramsPayload });
+    };
+  </script>
+</body>
+</html>
